@@ -1,0 +1,84 @@
+name: V2Ray Daily Validator
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs once every day at 00:00 UTC
+  workflow_dispatch: # Allows manual triggering from the UI
+
+concurrency:
+  group: v2ray-check
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests PySocks
+
+      - name: Cache Xray Core
+        id: cache-xray
+        uses: actions/cache@v4
+        with:
+          path: xray_core
+          key: ${{ runner.os }}-xray-latest
+
+      - name: Download Xray Core (if not cached)
+        if: steps.cache-xray.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p xray_core
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip -d xray_core
+          chmod +x xray_core/xray
+
+      - name: Run Validation Script
+        env:
+          APP_CONFIG_JSON: ${{ secrets.APP_CONFIG_JSON }}
+        run: python v2ray_tester.py
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [ -f clean_sub.txt ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "[+] Results generated! Proceeding with update."
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "[-] No results found."
+          fi
+
+      - name: Deploy to Public Server List (v2Store-app)
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          # Clone the public repository
+          git clone https://${GH_TOKEN}@github.com/mdr77b-lang/v2Store-app.git public_repo
+          # Merge new servers into the existing ones in the public repository
+          python merge_sub.py
+          # Commit and push to public repo
+          cd public_repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add clean_sub.txt
+          git commit -m "Update server list [$(date -u +'%Y-%m-%d %H:%M:%S')]"
+          git push origin main

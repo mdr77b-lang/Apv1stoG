@@ -1,69 +1,86 @@
 import base64
 import os
+import re
+import shutil
+
+SUPPORTED_SCHEMES=("vmess","vless","trojan","trojan-go","ss","hysteria2","hy2")
+LINK_RE=re.compile(r'(?i)\b(?:'+'|'.join(re.escape(s) for s in SUPPORTED_SCHEMES)+r')://[^\s<>"\']+')
+
+def b64d(s):
+    s=s.strip().replace('\n','').replace(' ','')
+    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+        for pad in ("", "=", "=="):
+            try:
+                return decoder(s + pad).decode('utf-8', errors='ignore')
+            except:
+                pass
+    return ""
+
+def extract_links(txt):
+    return [line.strip() for line in LINK_RE.findall(txt or "") if line.strip()]
+
+def decode_subscription(raw):
+    raw=(raw or "").strip()
+    if not raw:
+        return []
+    decoded=b64d(raw)
+    if "://" in decoded:
+        return extract_links(decoded)
+    return extract_links(raw)
+
+def encode_subscription(servers):
+    return base64.b64encode("\n".join(servers).encode("utf-8")).decode("utf-8")
+
+def read_subscription(path, label):
+    if not os.path.exists(path):
+        print(f"[!] {label} file not found: {path}")
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        raw=f.read()
+    servers=decode_subscription(raw)
+    print(f"[+] Loaded {len(servers)} servers from {label}: {path}")
+    return servers
+
+def atomic_write(path, content):
+    directory=os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp=path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)
 
 def main():
-    new_file = "clean_sub.txt"
-    dest_file = "public_repo/clean_sub.txt"
+    new_file=os.environ.get("NEW_SUB_FILE", "clean_sub.txt")
+    dest_file=os.environ.get("DEST_SUB_FILE", os.path.join("public_repo", "clean_sub.txt"))
+    create_backup=os.environ.get("CREATE_BACKUP", "1") != "0"
 
-    # Read new servers
-    if not os.path.exists(new_file):
-        print(f"[-] New file {new_file} not found. Nothing to merge.")
+    new_servers=read_subscription(new_file, "new")
+    if not new_servers:
+        print("[-] No new servers found. Destination clean_sub.txt was not changed.")
         return
 
-    try:
-        with open(new_file, "r", encoding="utf-8") as f:
-            new_b64 = f.read().strip()
-        new_content = base64.b64decode(new_b64).decode("utf-8", errors="ignore")
-        new_servers = [line.strip() for line in new_content.splitlines() if line.strip()]
-        print(f"[+] Loaded {len(new_servers)} new servers.")
-    except Exception as e:
-        print(f"[-] Error decoding new subscription: {e}")
+    existing_servers=read_subscription(dest_file, "existing")
+    seen=set(existing_servers)
+    added=[]
+    for server in new_servers:
+        if server not in seen:
+            seen.add(server)
+            added.append(server)
+
+    if not added:
+        print(f"[-] No new unique servers. Destination already contains all {len(new_servers)} checked servers.")
         return
 
-    # Read existing servers from the target repo
-    existing_servers = []
-    if os.path.exists(dest_file):
-        try:
-            with open(dest_file, "r", encoding="utf-8") as f:
-                old_b64 = f.read().strip()
-            if old_b64:
-                old_content = base64.b64decode(old_b64).decode("utf-8", errors="ignore")
-                existing_servers = [line.strip() for line in old_content.splitlines() if line.strip()]
-                print(f"[+] Loaded {len(existing_servers)} existing servers from destination.")
-        except Exception as e:
-            print(f"[-] Warning: Error reading or decoding existing subscription: {e}")
-    else:
-        print(f"[!] Destination file {dest_file} does not exist yet. It will be created.")
+    merged=existing_servers + added
+    if create_backup and os.path.exists(dest_file):
+        shutil.copy2(dest_file, dest_file + ".bak")
+        print(f"[+] Backup saved to {dest_file}.bak")
 
-    # Merge and deduplicate, keeping order
-    seen = set()
-    merged_servers = []
-    
-    # 1. Add existing servers first to preserve history
-    for s in existing_servers:
-        if s not in seen:
-            seen.add(s)
-            merged_servers.append(s)
-            
-    # 2. Add new unique servers
-    added_count = 0
-    for s in new_servers:
-        if s not in seen:
-            seen.add(s)
-            merged_servers.append(s)
-            added_count += 1
-
-    print(f"[+] Merged: {len(existing_servers)} existing + {added_count} new unique servers = {len(merged_servers)} total servers.")
-
-    # Write merged list back to destination
-    merged_content = "\n".join(merged_servers)
-    merged_b64 = base64.b64encode(merged_content.encode("utf-8")).decode("utf-8")
-
-    # Make sure target directory exists
-    os.makedirs(os.path.dirname(dest_file), exist_ok=True)
-    with open(dest_file, "w", encoding="utf-8") as f:
-        f.write(merged_b64)
-    print(f"[+] Successfully wrote merged base64 to {dest_file}")
+    merged_b64=encode_subscription(merged)
+    atomic_write(dest_file, merged_b64)
+    print(f"[+] Appended {len(added)} new unique servers to {dest_file}")
+    print(f"[+] Destination total: {len(merged)} servers")
 
 if __name__ == "__main__":
     main()
